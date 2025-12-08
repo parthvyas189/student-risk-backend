@@ -1,13 +1,23 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # <-- NEW IMPORT
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db, engine
 import models, schemas
 
-# This command ensures models are synced (good for dev, though we used SQL script)
+# Sync models
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Student Risk API")
+
+# --- CORS CONFIGURATION (Crucial for Vercel) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows ALL domains (Change this to your Vercel URL later for security)
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows GET, POST, PUT, DELETE, etc.
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def read_root():
@@ -21,19 +31,15 @@ def test_db_connection(db: Session = Depends(get_db)):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- NEW: Create Student Endpoint ---
 @app.post("/students/", response_model=schemas.StudentResponse)
 def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    # 1. Check if teacher exists (Quick hack: we assume teacher_id=1 exists for testing)
-    # Ideally, we check foreign keys, but let's try to insert.
-    
+    # Quick hack: assume teacher_id exists or provided
     db_student = models.Student(
         name=student.name,
         roll_number=student.roll_number,
         contact_email=student.contact_email,
         teacher_id=student.teacher_id 
     )
-    
     try:
         db.add(db_student)
         db.commit()
