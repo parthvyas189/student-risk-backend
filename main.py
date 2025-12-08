@@ -1,39 +1,33 @@
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # <-- NEW IMPORT
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from typing import List # <-- Added List for response_model
 from database import get_db, engine
-import models, schemas
+import models, schemas, model_client
+import json
 
 # Sync models
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Student Risk API")
 
-# --- CORS CONFIGURATION (Crucial for Vercel) ---
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows ALL domains (Change this to your Vercel URL later for security)
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows GET, POST, PUT, DELETE, etc.
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 @app.get("/")
 def read_root():
-    return {"message": "Student Risk Backend is Running!"}
+    return {"message": "Student Risk Backend is Online"}
 
-@app.get("/test-db")
-def test_db_connection(db: Session = Depends(get_db)):
-    try:
-        result = db.execute(text("SELECT 1"))
-        return {"status": "success", "message": "Database connection successful!"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+# --- Student Endpoints ---
 @app.post("/students/", response_model=schemas.StudentResponse)
 def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    # Quick hack: assume teacher_id exists or provided
     db_student = models.Student(
         name=student.name,
         roll_number=student.roll_number,
@@ -47,7 +41,87 @@ def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)
         return db_student
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Error creating student: {str(e)}")
+
+@app.get("/students/", response_model=List[schemas.StudentResponse])
+def get_all_students(db: Session = Depends(get_db)):
+    """Fetch all students to display in a dropdown"""
+    return db.query(models.Student).all()
+
+# --- Risk & Metrics Endpoints ---
+
+# 1. SUBMIT Data (POST) - Returns immediate analysis
+@app.post("/metrics/", response_model=schemas.RiskAnalysisResponse)
+async def submit_weekly_data(data: schemas.WeeklyMetricInput, db: Session = Depends(get_db)):
+    
+    # Save Raw Data
+    db_metric = models.WeeklyMetrics(
+        student_id=data.student_id,
+        week_start_date=data.week_start_date,
+        attendance_score=data.attendance_score,
+        homework_submission_rate=data.homework_submission_rate,
+        behavior_flag=data.behavior_flag,
+        test_score_average=data.test_score_average
+    )
+    
+    try:
+        db.add(db_metric)
+        db.commit()
+        db.refresh(db_metric)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Database Error: {str(e)}")
+
+    # Call Model
+    prediction = await model_client.get_risk_prediction(
+        student_id=data.student_id,
+        attendance=data.attendance_score,
+        homework=data.homework_submission_rate,
+        test_score=data.test_score_average,
+        behavior=data.behavior_flag
+    )
+
+    # Save Prediction
+    reasons_str = json.dumps(prediction.get("risk_reasons", []))
+    
+    db_risk = models.RiskPrediction(
+        student_id=data.student_id,
+        analysis_date=data.week_start_date,
+        risk_score=prediction.get("risk_score", 0.0),
+        risk_level=prediction.get("risk_level", "Unknown"),
+        risk_reasons=reasons_str
+    )
+    
+    try:
+        db.add(db_risk)
+        db.commit()
+    except Exception as e:
+        print(f"Warning: Failed to save risk prediction: {e}")
+
+    return {
+        "metric_id": db_metric.id,
+        "student_id": data.student_id,
+        "risk_score": db_risk.risk_score,
+        "risk_level": db_risk.risk_level,
+        "risk_reasons": prediction.get("risk_reasons", [])
+    }
+
+# 2. VIEW History (GET) - Fetches past records from DB
+@app.get("/students/{student_id}/history", response_model=List[schemas.RiskHistoryItem])
+def get_student_risk_history(student_id: int, db: Session = Depends(get_db)):
+    """
+    Returns the list of all past risk assessments for a student.
+    Useful for plotting graphs on the frontend.
+    """
+    history = db.query(models.RiskPrediction)\
+                .filter(models.RiskPrediction.student_id == student_id)\
+                .order_by(models.RiskPrediction.analysis_date.desc())\
+                .all()
+    
+    if not history:
+        return []
+        
+    return history
 
 if __name__ == "__main__":
     import uvicorn
