@@ -1,22 +1,8 @@
-# ... existing imports ...
-from pydantic import BaseModel # Ensure this is imported
-
-# --- NEW: Login Schema ---
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-class LoginResponse(BaseModel):
-    id: int
-    email: str
-    role: str
-    full_name: str
-
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import List # <-- Added List for response_model
+from typing import List 
 from database import get_db, engine
 import models, schemas, model_client
 import json
@@ -64,10 +50,8 @@ def get_all_students(db: Session = Depends(get_db)):
 
 # --- Risk & Metrics Endpoints ---
 
-# 1. SUBMIT Data (POST) - Returns immediate analysis
 @app.post("/metrics/", response_model=schemas.RiskAnalysisResponse)
 async def submit_weekly_data(data: schemas.WeeklyMetricInput, db: Session = Depends(get_db)):
-    
     # Save Raw Data
     db_metric = models.WeeklyMetrics(
         student_id=data.student_id,
@@ -120,33 +104,44 @@ async def submit_weekly_data(data: schemas.WeeklyMetricInput, db: Session = Depe
         "risk_reasons": prediction.get("risk_reasons", [])
     }
 
-# 2. VIEW History (GET) - Fetches past records from DB
 @app.get("/students/{student_id}/history", response_model=List[schemas.RiskHistoryItem])
 def get_student_risk_history(student_id: int, db: Session = Depends(get_db)):
-    """
-    Returns the list of all past risk assessments for a student.
-    Useful for plotting graphs on the frontend.
-    """
+    """Returns the list of all past risk assessments for a student."""
     history = db.query(models.RiskPrediction)\
                 .filter(models.RiskPrediction.student_id == student_id)\
                 .order_by(models.RiskPrediction.analysis_date.desc())\
                 .all()
-    
     if not history:
         return []
-        
     return history
+
+# --- NEW: Get Raw Metrics (For Averages) ---
+@app.get("/students/{student_id}/metrics", response_model=List[schemas.WeeklyMetricResponse])
+def get_student_metrics(student_id: int, db: Session = Depends(get_db)):
+    """Returns raw weekly data to calculate averages on frontend"""
+    metrics = db.query(models.WeeklyMetrics)\
+                .filter(models.WeeklyMetrics.student_id == student_id)\
+                .order_by(models.WeeklyMetrics.week_start_date.desc())\
+                .all()
+    return metrics
+
+# --- Login Endpoint ---
+from pydantic import BaseModel
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginResponse(BaseModel):
+    id: int
+    email: str
+    role: str
+    full_name: str
 
 @app.post("/login", response_model=LoginResponse)
 def login(creds: LoginRequest, db: Session = Depends(get_db)):
-    # Find user by email
     user = db.query(models.User).filter(models.User.email == creds.email).first()
-    
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    # Simple password check (In production, use bcrypt.verify(creds.password, user.password_hash))
-    # For now, we assume the DB stores plain text or we just compare strings
     if user.password_hash != creds.password:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
