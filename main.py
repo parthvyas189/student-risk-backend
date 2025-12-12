@@ -50,20 +50,36 @@ def get_all_students(db: Session = Depends(get_db)):
 
 # --- Risk & Metrics Endpoints ---
 
+# 1. SUBMIT Data (POST) - Returns immediate analysis
 @app.post("/metrics/", response_model=schemas.RiskAnalysisResponse)
 async def submit_weekly_data(data: schemas.WeeklyMetricInput, db: Session = Depends(get_db)):
-    # Save Raw Data
-    db_metric = models.WeeklyMetrics(
-        student_id=data.student_id,
-        week_start_date=data.week_start_date,
-        attendance_score=data.attendance_score,
-        homework_submission_rate=data.homework_submission_rate,
-        behavior_flag=data.behavior_flag,
-        test_score_average=data.test_score_average
-    )
+    
+    # Check if entry already exists for this student and week
+    existing_metric = db.query(models.WeeklyMetrics).filter(
+        models.WeeklyMetrics.student_id == data.student_id,
+        models.WeeklyMetrics.week_start_date == data.week_start_date
+    ).first()
+
+    if existing_metric:
+        # Update existing record
+        existing_metric.attendance_score = data.attendance_score
+        existing_metric.homework_submission_rate = data.homework_submission_rate
+        existing_metric.behavior_flag = data.behavior_flag
+        existing_metric.test_score_average = data.test_score_average
+        db_metric = existing_metric
+    else:
+        # Create new record
+        db_metric = models.WeeklyMetrics(
+            student_id=data.student_id,
+            week_start_date=data.week_start_date,
+            attendance_score=data.attendance_score,
+            homework_submission_rate=data.homework_submission_rate,
+            behavior_flag=data.behavior_flag,
+            test_score_average=data.test_score_average
+        )
+        db.add(db_metric)
     
     try:
-        db.add(db_metric)
         db.commit()
         db.refresh(db_metric)
     except Exception as e:
@@ -81,6 +97,10 @@ async def submit_weekly_data(data: schemas.WeeklyMetricInput, db: Session = Depe
 
     # Save Prediction
     reasons_str = json.dumps(prediction.get("risk_reasons", []))
+    
+    # Check if risk prediction exists for this date/student to avoid duplicate risk entries too (optional but cleaner)
+    # For now, just adding new prediction is fine as history, or we could update similarly.
+    # Let's keep adding new risk predictions to track changes over time even for same week updates.
     
     db_risk = models.RiskPrediction(
         student_id=data.student_id,
@@ -104,15 +124,21 @@ async def submit_weekly_data(data: schemas.WeeklyMetricInput, db: Session = Depe
         "risk_reasons": prediction.get("risk_reasons", [])
     }
 
+# 2. VIEW History (GET) - Fetches past records from DB
 @app.get("/students/{student_id}/history", response_model=List[schemas.RiskHistoryItem])
 def get_student_risk_history(student_id: int, db: Session = Depends(get_db)):
-    """Returns the list of all past risk assessments for a student."""
+    """
+    Returns the list of all past risk assessments for a student.
+    Useful for plotting graphs on the frontend.
+    """
     history = db.query(models.RiskPrediction)\
                 .filter(models.RiskPrediction.student_id == student_id)\
                 .order_by(models.RiskPrediction.analysis_date.desc())\
                 .all()
+    
     if not history:
         return []
+        
     return history
 
 # --- NEW: Get Raw Metrics (For Averages) ---
@@ -139,9 +165,14 @@ class LoginResponse(BaseModel):
 
 @app.post("/login", response_model=LoginResponse)
 def login(creds: LoginRequest, db: Session = Depends(get_db)):
+    # Find user by email
     user = db.query(models.User).filter(models.User.email == creds.email).first()
+    
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Simple password check (In production, use bcrypt.verify(creds.password, user.password_hash))
+    # For now, we assume the DB stores plain text or we just compare strings
     if user.password_hash != creds.password:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
