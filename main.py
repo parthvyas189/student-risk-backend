@@ -1,3 +1,17 @@
+# ... existing imports ...
+from pydantic import BaseModel # Ensure this is imported
+
+# --- NEW: Login Schema ---
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class LoginResponse(BaseModel):
+    id: int
+    email: str
+    role: str
+    full_name: str
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -122,6 +136,26 @@ def get_student_risk_history(student_id: int, db: Session = Depends(get_db)):
         return []
         
     return history
+
+@app.post("/login", response_model=LoginResponse)
+def login(creds: LoginRequest, db: Session = Depends(get_db)):
+    # Find user by email
+    user = db.query(models.User).filter(models.User.email == creds.email).first()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Simple password check (In production, use bcrypt.verify(creds.password, user.password_hash))
+    # For now, we assume the DB stores plain text or we just compare strings
+    if user.password_hash != creds.password:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "full_name": user.full_name
+    }
 
 if __name__ == "__main__":
     import uvicorn
