@@ -21,6 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
 def read_root():
     return {"message": "Student Risk Backend is Online"}
@@ -183,6 +184,86 @@ def login(creds: LoginRequest, db: Session = Depends(get_db)):
         "full_name": user.full_name
     }
 
+@app.post("/metrics/bulk")
+async def submit_bulk_metrics(data_list: List[schemas.WeeklyMetricInput], db: Session = Depends(get_db)):
+    """
+    Accepts a list of metrics and processes them one by one.
+    Returns a summary of success/failure.
+    """
+    results = {
+        "total": len(data_list),
+        "success": 0,
+        "failed": 0,
+        "errors": []
+    }
+
+    for data in data_list:
+        try:
+            # 1. Database Logic (Check/Update)
+            existing_metric = db.query(models.WeeklyMetrics).filter(
+                models.WeeklyMetrics.student_id == data.student_id,
+                models.WeeklyMetrics.week_start_date == data.week_start_date
+            ).first()
+
+            if existing_metric:
+                existing_metric.attendance_score = data.attendance_score
+                existing_metric.homework_submission_rate = data.homework_submission_rate
+                existing_metric.behavior_flag = data.behavior_flag
+                existing_metric.test_score_average = data.test_score_average
+                db_metric = existing_metric
+            else:
+                db_metric = models.WeeklyMetrics(
+                    student_id=data.student_id,
+                    week_start_date=data.week_start_date,
+                    attendance_score=data.attendance_score,
+                    homework_submission_rate=data.homework_submission_rate,
+                    behavior_flag=data.behavior_flag,
+                    test_score_average=data.test_score_average
+                )
+                db.add(db_metric)
+            
+            db.commit()
+            db.refresh(db_metric)
+
+            # 2. Model Logic
+            prediction = await model_client.get_risk_prediction(
+                student_id=data.student_id,
+                attendance=data.attendance_score,
+                homework=data.homework_submission_rate,
+                test_score=data.test_score_average,
+                behavior=data.behavior_flag
+            )
+
+            # 3. Risk Logic
+            reasons_str = json.dumps(prediction.get("risk_reasons", []))
+            
+            # Ensure valid ENUM
+            risk_lvl = prediction.get("risk_level", "Medium")
+            if risk_lvl not in ['Low', 'Medium', 'High']: 
+                risk_lvl = "Medium"
+
+            db_risk = models.RiskPrediction(
+                student_id=data.student_id,
+                analysis_date=data.week_start_date,
+                risk_score=prediction.get("risk_score", 0.0),
+                risk_level=risk_lvl,
+                risk_reasons=reasons_str
+            )
+            db.add(db_risk)
+            db.commit()
+            
+            results["success"] += 1
+
+        except Exception as e:
+            db.rollback()
+            results["failed"] += 1
+            results["errors"].append(f"Student {data.student_id}: {str(e)}")
+            continue
+
+    return results
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    
